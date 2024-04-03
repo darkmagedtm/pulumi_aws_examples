@@ -5,73 +5,103 @@ import * as pulumi from "@pulumi/pulumi";
 import * as aws from "@pulumi/aws";
 
 // My existing Prod stack's values - VPC, public/private subnets, roles, Route53
-const vpc = "vpc-12345678";
-const pubSubs = ["subnet-12345678", "subnet-87654321"]
-const privSubs = ["subnet-23456789", "subnet-98765432"]
+const vpc = "vpc-12345678"; //your VPC id here
+const pubSubs = ["subnet-12345678", "subnet-87654321"] //public subnets here
+const privSubs = ["subnet-23456789", "subnet-98765432"] //private subnets here
 const execIamRole = "arn:aws:iam::123456789:role/test-use1-iam-sgs-ro-EcsTaskExecutionRole"
-const serviceRole = "arn:aws:iam::123456789:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS"
-const r53ZoneID = "ZTYXW98754"
+// const serviceRole = "arn:aws:iam::123456789:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS" // doesn't seem to be needed now, but left for transparency
+const scalingRole = "arn:aws:iam::123456789:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService";
+const webCert = "arn:aws:iam::123456789:certificate/guid";
+const r53ZoneID = aws.route53.getZone({ name: "domainname.org." });
+const stdCPU = 1024;
+const stdMEM = 2048;
+const SysName = "mysystem";
+const SysEnv = "test";
+const SysRegion = "east";
+const FullRegion = "us-east-1";
+const R53Name = "mysystem.domainname.org"
+const DockerImg = "123456789.dkr.ecr.us-east-1.amazonaws.com/mysystem:test";
 
-//New security group for the load balancer
-const prod_east_lbsg = new aws.ec2.SecurityGroup("prod-east-lbsg", {
+const Parameters = [
+    {
+        name: "environment",
+        valueFrom: "arn:aws:ssm:us-east-1:123456789:parameter/test/mysystem/env/environment"
+    },
+    {
+        name: "othervariable",
+        valueFrom: "arn:aws:ssm:us-east-1:123456789:parameter/test/mysystem/env/othervariable"
+    },
+]
+
+const envStub = `${SysName}-${SysEnv}-${SysRegion}`;
+const envStubU = `${SysName}_${SysEnv}_${SysRegion}`;
+
+//change nothing below this
+const lbsg = new aws.ec2.SecurityGroup(`${envStub}-lbsg`, {
+    name: `${envStub}-lbsg`,
     description: "Enable HTTPS access",
-    ingress: [
-        // Allow inbound traffic from anywhere in the world on port 443 (HTTPS)
-        {
-            protocol: "tcp",
-            fromPort: 443,
-            toPort: 443,
-            cidrBlocks: ["0.0.0.0/0"],
-        },
-    ],
-    egress: [
-        // Allow outbound traffic to any destination
-        {
-            protocol: "-1", 
-            fromPort: 0,
-            toPort: 0,
-            cidrBlocks: ["0.0.0.0/0"],
-        },
-    ],
+    vpcId: `${vpc}`,
 });
 
-//New security group for the ECS tasks
-const prod_east_tasksg = new aws.ec2.SecurityGroup("prod-east-tasksg", {
+const lbIngress = new aws.ec2.SecurityGroupRule(`${envStub}-https-ingress`, {
+    type: "ingress",
+    fromPort: 443,
+    toPort: 443,
+    protocol: "tcp",
+    cidrBlocks: ["0.0.0.0/0"],
+    securityGroupId: lbsg.id,
+});
+
+// Create an egress rule for allowing all outbound traffic
+const lbdefaultEgressRule = new aws.ec2.SecurityGroupRule(`${envStub}-lbdefault-egress`, {
+    type: "egress",
+    fromPort: 0,
+    toPort: 0,
+    protocol: "-1",
+    cidrBlocks: ["0.0.0.0/0"],
+    securityGroupId: lbsg.id,
+});
+
+const tasksg = new aws.ec2.SecurityGroup(`${envStub}-tasksg`, {
+    name: `${envStub}-tasksg`,
     description: "Enable port 80 access",
-    ingress: [
-        // Allow inbound traffic from anywhere in the world on port 80 (HTTP)
-        {
-            protocol: "tcp",
-            fromPort: 80,
-            toPort: 80,
-            cidrBlocks: ["0.0.0.0/0"],
-        },
-    ],
-    egress: [
-        // Allow outbound traffic to any destination
-        {
-            protocol: "-1", 
-            fromPort: 0,
-            toPort: 0,
-            cidrBlocks: ["0.0.0.0/0"],
-        },
-    ],
+    vpcId: `${vpc}`,
 });
 
-//New Load Balancer
-const prod_east_alb = new aws.lb.LoadBalancer("prod-east-alb", {
+const taskIngress = new aws.ec2.SecurityGroupRule(`${envStub}-http-ingress`, {
+    type: "ingress",
+    fromPort: 80,
+    toPort: 80,
+    protocol: "tcp",
+    cidrBlocks: ["0.0.0.0/0"],
+    securityGroupId: tasksg.id,
+});
+
+// Create an egress rule for allowing all outbound traffic
+const defaultEgressRule = new aws.ec2.SecurityGroupRule(`${envStub}-default-egress`, {
+    type: "egress",
+    fromPort: 0,
+    toPort: 0,
+    protocol: "-1",
+    cidrBlocks: ["0.0.0.0/0"],
+    securityGroupId: tasksg.id,
+});
+
+const alb = new aws.lb.LoadBalancer(`${envStub}-alb`, {
+    name: `${envStub}-alb`,
     internal: false,
     loadBalancerType: "application",
-    securityGroups: [prod_east_lbsg.id],
+    securityGroups: [lbsg.id],
     subnets: pubSubs,
     enableDeletionProtection: true,
     tags: {
-        Environment: "production",
+        Environment: "test",
     },
 });
 
 // Create a target group for the load balancer to route traffic to
-const prod_east_tg = new aws.lb.TargetGroup("prod-east-tg", {
+const tg = new aws.lb.TargetGroup(`${envStub}-tg`, {
+    name: `${envStub}-tg`,
     port: 80,
     protocol: 'HTTP',
     targetType: 'ip',
@@ -79,89 +109,171 @@ const prod_east_tg = new aws.lb.TargetGroup("prod-east-tg", {
 });
 
 // Create a listener for incoming traffic on the load balancer
-const prod_east_listener = new aws.lb.Listener("prod-east-listener", {
-    loadBalancerArn: prod_east_alb.arn,
+const listener = new aws.lb.Listener(`${envStub}-listener`, {
+    loadBalancerArn: alb.arn,
     port: 443,
     protocol: "HTTPS",
     sslPolicy: "ELBSecurityPolicy-TLS13-1-2-2021-06",
-    certificateArn: "arn:aws:acm:us-east-1:123456789:certificate/<SID>",
+    certificateArn: webCert,
     defaultActions: [{
         type: "forward",
-        targetGroupArn: prod_east_tg.arn,
+        targetGroupArn: tg.arn,
     }],
 });
 
-//New Task Defintion - this took a lot of tweaking
-const prod_east_td = new aws.ecs.TaskDefinition("prod-east-td", {
+const example = new aws.elasticache.Cluster(`${envStub}-cache`, {
+    clusterId: `${envStub}-cache`,
+    engine: "memcached",
+    nodeType: "cache.t3.medium",
+    numCacheNodes: 2,
+    subnetGroupName: "memcache-test-subnetgroup",
+    parameterGroupName: "default.memcached1.6",
+    port: 11211,
+});
+
+const lg = new aws.cloudwatch.LogGroup(`${envStub}-lg`, {
+    name: `/ecs/${envStub}`,
+    tags: {
+        Environment: SysEnv,
+        Application: SysName,
+    },
+});
+
+const td = new aws.ecs.TaskDefinition(`${envStub}-td`, {
     containerDefinitions: JSON.stringify([
   {
-    name: "prod-east-svc",
-    //we use a private ECR image pushed by our current code control system
-    image: "123456789.dkr.ecr.us-east-1.amazonaws.com/image:production",
-    cpu: 1024,
-    memory: 2048,
+    name: `${envStub}-svc`,
+    image: DockerImg,
+    cpu: stdCPU,
+    memory: stdMEM,
+    memoryReservation: stdMEM,
     essential: true,
     portMappings: [{
+        name: `${envStub}-80-tcp`,
         containerPort: 80,
         hostPort: 80,
+        protocol: "tcp"
     }],
-    //we use Parameter store for environment variables. Examples included
-    secrets: [
-        {
-            name: "environment",
-            valueFrom: "arn:aws:ssm:us-east-1:123456789:parameter/prod/app/env/environment"
-        },
-        {
-            name: "PRIVATE_CERT",
-            valueFrom: "arn:aws:ssm:us-east-1:123456789:parameter/prod/app/env/PRIVATE_CERT"
-        },
-        {
-            name: "PUBLIC_CERT",
-            valueFrom: "arn:aws:ssm:us-east-1:123456789:parameter/prod/app/env/PUBLIC_CERT"
-        },
-    ],
+    secrets: Parameters,
+    "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+            "awslogs-group": `/ecs/${envStub}`,
+            "awslogs-region": `${FullRegion}`,
+            "awslogs-stream-prefix": "ecs"
+        }
+    }
   }
 ]),
-    cpu: "1024",
-    family: "prod-east",
-    memory: "2048",
+    cpu: String(stdCPU),
+    family: `${envStub}`,
+    memory: String(stdMEM),
     networkMode: "awsvpc",
     requiresCompatibilities: ["FARGATE"],
     executionRoleArn: execIamRole,
 });
 
-//New ECS Cluster
-const prod_east_cluster = new aws.ecs.Cluster("prod-east-cluster", {settings: [{
-    name: "containerInsights",
-    value: "enabled",
-}]});
+const cluster = new aws.ecs.Cluster(`${envStub}-cluster`, {
+    name: `${envStub}-cluster`,
+   settings: [{
+      name: "containerInsights",
+      value: "enabled",
+  }]});
 
-//New ECS Service
-const prod_east_service = new aws.ecs.Service("prod-east-service", {
-    cluster: prod_east_cluster.arn,
-    taskDefinition: prod_east_td.arn,
+const service = new aws.ecs.Service(`${envStub}-service`, {
+    cluster: cluster.arn,
+    name: `${envStub}-service`,
+    taskDefinition: td.arn,
     launchType: "FARGATE",
     desiredCount: 2,
+//    iamRole: serviceRole,  //doesn't seem to be needed now, but left for transparency
 networkConfiguration: {
     assignPublicIp: false,
     subnets: privSubs,
-    securityGroups: [prod_east_tasksg.id],
+    securityGroups: [tasksg.id],
 },
 loadBalancers: [{
-        targetGroupArn: prod_east_tg.arn,
-        containerName: "prod-east-svc",
+        targetGroupArn: tg.arn,
+        containerName: `${envStub}-svc`,
         containerPort: 80,
     }],
 });
 
-// Configure a CNAME record for the www subdomain, pointing it to an S3 bucket
-const record = new aws.route53.Record("appCnameRecord", {
-    // reference the zone's zoneId
-    zoneId: r53ZoneID,
-    name: "app", // this will create a record for "www.mydomain.com"
-     // this is the type of DNS record you're creating. In this case it's CNAME
-    type: "CNAME",
-    // the value of the record; replace "mybucket" with your S3 bucket name
-    records: [prod_east_alb.dnsName],
-    ttl: 300, // time-to-live; you may select a suitable value for your use case
+const scaling_target = new aws.appautoscaling.Target(`${envStub}-scaling-target`, {
+    maxCapacity: 25,
+    minCapacity: 2,
+    resourceId: `service/${envStub}-cluster/${envStub}-service`,
+    roleArn: scalingRole,
+    scalableDimension: "ecs:service:DesiredCount",
+    serviceNamespace: "ecs",
+},);
+
+export const loadBalancerNumericId = alb.arn.apply(arn => {
+    // Split the ARN by `:` to isolate the components
+    const arnParts = arn.split(":");
+    // The numeric identifier is typically the last part after the final `:`
+    const lastPart = arnParts[arnParts.length - 1];
+    // Return the numeric identifier (assuming it is at the end of the ARN)
+    return lastPart.split("/").pop() ?? "";
 });
+
+export const tgNumericId = tg.arn.apply(arn => {
+    // Split the ARN by `:` to isolate the components
+    const arnParts = arn.split(":");
+    // The numeric identifier is typically the last part after the final `:`
+    const lastPart = arnParts[arnParts.length - 1];
+    // Return the numeric identifier (assuming it is at the end of the ARN)
+    return lastPart.split("/").pop() ?? "";
+});
+
+const albLabel= pulumi.interpolate `app/${alb.name}/${loadBalancerNumericId}/targetgroup/${tg.name}/${tgNumericId}`
+
+const autoscale_policy = new aws.appautoscaling.Policy(`${envStub}-autoscale-policy`, {
+    name: `${envStub}-LB-Scaling`,
+    policyType: "TargetTrackingScaling",
+    resourceId: `service/${envStub}-cluster/${envStub}-service`,
+    scalableDimension: "ecs:service:DesiredCount",
+    serviceNamespace: "ecs",
+    targetTrackingScalingPolicyConfiguration: {
+        predefinedMetricSpecification: {
+            predefinedMetricType: "ALBRequestCountPerTarget",
+            resourceLabel: albLabel,
+        },
+        scaleInCooldown: 300,
+        scaleOutCooldown: 300,
+        targetValue: 300,
+    },
+},);
+
+const cpu_scaling_policy = new aws.appautoscaling.Policy(`${envStub}-cpu-scaling`, {
+    name: `${envStub}-CPU-Scaling`,
+    policyType: "TargetTrackingScaling",
+    resourceId: `service/${envStub}-cluster/${envStub}-service`,
+    scalableDimension: "ecs:service:DesiredCount",
+    serviceNamespace: "ecs",
+    targetTrackingScalingPolicyConfiguration: {
+        predefinedMetricSpecification: {
+            predefinedMetricType: "ECSServiceAverageCPUUtilization",
+        },
+        scaleInCooldown: 300,
+        scaleOutCooldown: 300,
+        targetValue: 30,
+    },
+},);
+
+//Configure a CNAME record for the www subdomain, pointing it to an S3 bucket
+const record = new aws.route53.Record(`${envStub}-Cname-Record`, {
+    // reference the zone's zoneId
+    zoneId: r53ZoneID.then(z => z.id),
+    name: R53Name, // this will create a record for "www.mydomain.com"
+    allowOverwrite: true,
+    type: "A",
+    aliases: [{
+        name: alb.dnsName,
+        zoneId: alb.zoneId,
+        evaluateTargetHealth: false,
+    }],
+});
+
+// Output the DNS name of the load balancer to access it
+export const albDnsName = alb.loadBalancer.dnsName;
